@@ -1,0 +1,383 @@
+﻿@page "/"
+@using System.Net.WebSockets
+@using System.Text
+@using System.Threading
+@using Newtonsoft.Json;
+@implements IDisposable
+@inject AppSettings AppSettings
+
+<h1>Dashboard</h1>
+<div class="columns">
+    <div class="column has-text-centered">
+        <h3>
+            State: @webSocket.State
+            <Button Clicked="@ToggleDebugging" class="button is-info">
+                <span class="oi oi-eye" aria-hidden="true"> </span>&nbsp
+                Show/Hide Debugging
+            </Button>
+        </h3>
+        @if (showDebugging)
+        {
+            <textarea readonly class="textarea is-info" rows="9" style="width:100%">@log</textarea>
+        }
+        <br />
+        @if (isUnderThresholdCO2)
+        {
+            <p class="has-text-danger">CO2 under threshold</p>
+        }
+        <div class="box" style="@isUnderThresholdStyleString(isUnderThresholdCO2)">
+            <LineChart @ref="horizontalLineChartCO2" TItem="LiveDataPoint" OptionsObject="@horizontalLineChartCO2Options">
+                <ChartStreaming TItem="LiveDataPoint"
+                                Options="new ChartStreamingOptions { Delay = 2000 }"
+                                Refreshed="@OnCO2HorizontalLineRefreshed" />
+            </LineChart>
+        </div>
+    </div>
+    <div class="column has-text-centered">
+        @if (isUnderThresholdTemperature)
+        {
+            <p class="has-text-danger">Temperature under threshold</p>
+        }
+        <div class="box" style="@isUnderThresholdStyleString(isUnderThresholdTemperature)">
+            <LineChart @ref="horizontalLineChartTemperature" TItem="LiveDataPoint" OptionsObject="@horizontalLineChartTemperatureOptions">
+                <ChartStreaming TItem="LiveDataPoint"
+                                Options="new ChartStreamingOptions { Delay = 2000 }"
+                                Refreshed="@OnTemperatureHorizontalLineRefreshed" />
+            </LineChart>
+        </div>
+        @if (isUnderThresholdHumidity)
+        {
+            <p class="has-text-danger">Humidity under threshold</p>
+        }
+        <div class="box" style="@isUnderThresholdStyleString(isUnderThresholdHumidity)">
+            <LineChart @ref="horizontalLineChartHumidity" TItem="LiveDataPoint" OptionsObject="@horizontalLineChartHumidityOptions">
+                <ChartStreaming TItem="LiveDataPoint"
+                                Options="new ChartStreamingOptions { Delay = 2000 }"
+                                Refreshed="@OnHumidityHorizontalLineRefreshed" />
+            </LineChart>
+        </div>
+    </div>
+</div>
+
+@code {
+
+    //----------------------------------------------------Web Socket----------------------------------------------------
+
+    CancellationTokenSource disposalTokenSource = new CancellationTokenSource();
+    ClientWebSocket webSocket = new ClientWebSocket();
+    string message = "init";
+    string log = "";
+    bool showDebugging = true;
+    bool isUnderThresholdTemperature = false, isUnderThresholdHumidity = false, isUnderThresholdCO2 = false;
+    string isUnderThresholdStyleString(bool isUnderThreshold)
+    {
+        return isUnderThreshold ? "border: 1px solid red" : "";
+    }
+
+    private void ToggleDebugging()
+    {
+        showDebugging = !showDebugging;
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await webSocket.ConnectAsync(new Uri("ws://192.168.1.100:80"), disposalTokenSource.Token);
+        _ = ReceiveLoop();
+    }
+
+    async Task SendMessageAsync()
+    {
+        var dataToSend = new ArraySegment<byte>(Encoding.UTF8.GetBytes(message));
+        await webSocket.SendAsync(dataToSend, WebSocketMessageType.Text, true, disposalTokenSource.Token);
+    }
+
+    async Task ReceiveLoop()
+    {
+        var buffer = new ArraySegment<byte>(new byte[1024]);
+        while (!disposalTokenSource.IsCancellationRequested)
+        {
+            // Note that the received block might only be part of a larger message. If this applies in your scenario,
+            // check the received.EndOfMessage and consider buffering the blocks until that property is true.
+            // Or use a higher-level library such as SignalR.
+
+            var received = await webSocket.ReceiveAsync(buffer, disposalTokenSource.Token);
+            var receivedAsText = Encoding.UTF8.GetString(buffer.Array, 0, received.Count);
+
+            doc = JsonConvert.DeserializeObject<Doc>(receivedAsText);
+
+            // Check if Temperature value is under theshold
+            if (doc.pins.GPIO10 < AppSettings.thresholdTemperature)
+            {
+                isUnderThresholdTemperature = true;
+                log += $"Sent: Warning Temperature under threshold\n";
+            }
+            else
+            {
+                isUnderThresholdTemperature = false;
+            }
+
+            // Check if Humidity value is under theshold
+            if (doc.pins.GPIO9 < AppSettings.thresholdHumidity)
+            {
+                isUnderThresholdHumidity = true;
+                log += $"Sent: Warning Humidity under threshold\n";
+            }
+            else
+            {
+                isUnderThresholdHumidity = false;
+            }
+
+            // Check if CO2 value is under theshold
+            if (doc.pins.A0 < AppSettings.thresholdCO2)
+            {
+                isUnderThresholdCO2 = true;
+                log += $"Sent: Warning CO2 under threshold\n";
+            }
+            else
+            {
+                isUnderThresholdCO2 = false;
+            }
+
+            log += $"Received: {receivedAsText}\n";
+            StateHasChanged();
+        }
+    }
+
+    public void Dispose()
+    {
+        disposalTokenSource.Cancel();
+        _ = webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Bye", CancellationToken.None);
+    }
+
+    //----------------------------------------------------Live Streaming Charts----------------------------------------------------
+
+    //---------------------------Globals---------------------------
+
+    LineChart<LiveDataPoint> horizontalLineChartTemperature;
+    LineChart<LiveDataPoint> horizontalLineChartHumidity;
+    LineChart<LiveDataPoint> horizontalLineChartCO2;
+    Random random = new Random(DateTime.Now.Millisecond);
+
+    string[] Labels = { "Red", "Blue", "Yellow", "Green", "Purple", "Orange" };
+    List<string> backgroundColors = new List<string> { ChartColor.FromRgba(255, 99, 132, 0.2f), ChartColor.FromRgba(54, 162, 235, 0.2f), ChartColor.FromRgba(255, 206, 86, 0.2f), ChartColor.FromRgba(75, 192, 192, 0.2f), ChartColor.FromRgba(153, 102, 255, 0.2f), ChartColor.FromRgba(255, 159, 64, 0.2f) };
+    List<string> borderColors = new List<string> { ChartColor.FromRgba(255, 99, 132, 1f), ChartColor.FromRgba(54, 162, 235, 1f), ChartColor.FromRgba(255, 206, 86, 1f), ChartColor.FromRgba(75, 192, 192, 1f), ChartColor.FromRgba(153, 102, 255, 1f), ChartColor.FromRgba(255, 159, 64, 1f) };
+
+    public struct LiveDataPoint
+    {
+        public object X { get; set; }
+
+        public object Y { get; set; }
+    }
+
+    object horizontalLineChartTemperatureOptions = new
+    {
+        Title = new
+        {
+            Display = true,
+            Text = "Temperature horizontal Line chart"
+        },
+        Scales = new
+        {
+            YAxes = new object[]
+        {
+                new {
+                    ScaleLabel = new {
+                    Display = true, LabelString = "C º" }
+                }
+                                                }
+        },
+        Tooltips = new
+        {
+            Mode = "nearest",
+            Intersect = false
+        },
+        Hover = new
+        {
+            Mode = "nearest",
+            Intersect = false
+        }
+    };
+
+    object horizontalLineChartHumidityOptions = new
+    {
+        Title = new
+        {
+            Display = true,
+            Text = "Humidity horizontal Line chart"
+        },
+        Scales = new
+        {
+            YAxes = new object[]
+        {
+                new {
+                    ScaleLabel = new {
+                    Display = true, LabelString = "%" }
+                }
+                                                }
+        },
+        Tooltips = new
+        {
+            Mode = "nearest",
+            Intersect = false
+        },
+        Hover = new
+        {
+            Mode = "nearest",
+            Intersect = false
+        }
+    };
+
+    object horizontalLineChartCO2Options = new
+    {
+        Title = new
+        {
+            Display = true,
+            Text = "CO2 horizontal Line chart"
+        },
+        Scales = new
+        {
+            YAxes = new object[]
+        {
+                new {
+                    ScaleLabel = new {
+                    Display = true, LabelString = "ppm" }
+                }
+                                                }
+        },
+        Tooltips = new
+        {
+            Mode = "nearest",
+            Intersect = false
+        },
+        Hover = new
+        {
+            Mode = "nearest",
+            Intersect = false
+        }
+    };
+
+    LineChartDataset<LiveDataPoint> GetLineChartDatasetTemperature()
+    {
+        return new LineChartDataset<LiveDataPoint>
+        {
+            Data = new List<LiveDataPoint>(),
+            Label = "Temperature",
+            BackgroundColor = backgroundColors[0],
+            BorderColor = borderColors[0],
+            Fill = false,
+            LineTension = 0,
+            BorderDash = new List<int> { 8, 4 },
+        };
+    }
+    LineChartDataset<LiveDataPoint> GetLineChartDatasetCO2()
+    {
+        return new LineChartDataset<LiveDataPoint>
+        {
+            Data = new List<LiveDataPoint>(),
+            Label = "CO2",
+            BackgroundColor = backgroundColors[2],
+            BorderColor = borderColors[2],
+            Fill = false,
+            LineTension = 0,
+            BorderDash = new List<int> { 8, 4 },
+        };
+    }
+    static Doc doc;
+
+    public class Doc
+    {
+        public Pins pins;
+    }
+
+    public class Pins
+    {
+        public float A0;
+        public float GPIO10;
+        public float GPIO9;
+    }
+
+    LineChartDataset<LiveDataPoint> GetLineChartDatasetHumidity()
+    {
+        return new LineChartDataset<LiveDataPoint>
+        {
+            Data = new List<LiveDataPoint>(),
+            Label = "Humidity",
+            BackgroundColor = backgroundColors[1],
+            BorderColor = borderColors[1],
+            Fill = false,
+            LineTension = 0,
+            BorderDash = new List<int> { 0, 0 },
+        };
+    }
+
+    //---------------------------Functions---------------------------
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await Task.WhenAll(
+            HandleRedraw(horizontalLineChartTemperature, new Func<LineChartDataset<LiveDataPoint>>[] { GetLineChartDatasetTemperature }),
+            HandleRedraw(horizontalLineChartHumidity, new Func<LineChartDataset<LiveDataPoint>>[] { GetLineChartDatasetHumidity }),
+            HandleRedraw(horizontalLineChartCO2, new Func<LineChartDataset<LiveDataPoint>>[] { GetLineChartDatasetCO2 })
+            );
+        }
+    }
+
+    Task OnTemperatureHorizontalLineRefreshed(ChartStreamingData<LiveDataPoint> data)
+    {
+        if (webSocket.State == WebSocketState.Open)
+        {
+            SendMessageAsync();
+        }
+        data.Value = new LiveDataPoint
+        {
+            X = DateTime.Now,
+            Y = doc.pins.GPIO10,
+        };
+
+        return Task.CompletedTask;
+    }
+
+    Task OnHumidityHorizontalLineRefreshed(ChartStreamingData<LiveDataPoint> data)
+    {
+        data.Value = new LiveDataPoint
+        {
+            X = DateTime.Now,
+            Y = doc.pins.GPIO9,
+        };
+
+        return Task.CompletedTask;
+    }
+    Task OnCO2HorizontalLineRefreshed(ChartStreamingData<LiveDataPoint> data)
+    {
+        data.Value = new LiveDataPoint
+        {
+            X = DateTime.Now,
+            Y = doc.pins.A0,
+        };
+
+        return Task.CompletedTask;
+    }
+    double RandomScalingFactor()
+    {
+        return (random.NextDouble() > 0.5 ? 1.0 : -1.0) * Math.Round(random.NextDouble() * 100);
+    }
+
+    async Task HandleRedraw<TDataSet, TItem, TOptions, TModel>(BaseChart<TDataSet, TItem, TOptions, TModel> chart, params Func<TDataSet>[] getDataSets)
+        where TDataSet : ChartDataset<TItem>
+        where TOptions : ChartOptions
+        where TModel : ChartModel
+    {
+        await chart.Clear();
+
+        await chart.AddLabelsDatasetsAndUpdate(Labels, getDataSets.Select(x => x.Invoke()).ToArray());
+    }
+
+    async Task HandleRedrawAll()
+    {
+        await HandleRedraw(horizontalLineChartTemperature, GetLineChartDatasetTemperature);
+        await HandleRedraw(horizontalLineChartHumidity, GetLineChartDatasetHumidity);
+        await HandleRedraw(horizontalLineChartCO2, GetLineChartDatasetCO2);
+    }
+}

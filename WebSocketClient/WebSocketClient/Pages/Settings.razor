@@ -1,0 +1,19 @@
+﻿@page "/settings"
+@inject AppSettings AppSettings
+
+<h1>Settings</h1>
+
+<div class="columns">
+    <div class="column">
+        <h5>Temperature threshold: @AppSettings.thresholdTemperature</h5>
+        <input class="input" type="number" @bind="AppSettings.thresholdTemperature" @bind:event="oninput" />
+    </div>
+    <div class="column">
+        <h5>Humidity threshold: @AppSettings.thresholdHumidity</h5>
+        <input class="input" type="number" @bind="AppSettings.thresholdHumidity" @bind:event="oninput" />
+    </div>
+    <div class="column">
+        <h5>CO2 threshold: @AppSettings.thresholdCO2</h5>
+        <input class="input" type="number" @bind="AppSettings.thresholdCO2" @bind:event="oninput" />
+    </div>
+</div>
